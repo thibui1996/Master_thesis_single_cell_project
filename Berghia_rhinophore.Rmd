@@ -1,0 +1,1254 @@
+---
+title: "Berghia_rhinophore"
+author: "Thi Bui"
+date: "9/6/2020"
+output: 
+    html_document: default
+    html_notebook: default
+    
+---
+
+### Set up workspace
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(tximport)
+library(patchwork)
+library(dplyr)
+library(stringr)
+library(tidyverse)
+#library(fishpond)
+#library(RColorBrewer)
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+library(pheatmap)
+library(gridExtra)
+```
+
+
+### Import data to Seurat
+
+```{r, echo = T}
+load("~/Documents/R_directory/Berghia-scRNAseq-v2/rhi_0.Rdata")
+load("~/Documents/R_directory/Berghia-scRNAseq-v2/rhi_1.Rdata")
+load("~/Documents/R_directory/Berghia-scRNAseq-v2/rhi_2.Rdata")
+load("~/Documents/R_directory/Berghia-scRNAseq-v2/rhi_3.Rdata")
+load("~/Documents/R_directory/Berghia-scRNAseq-v2/rhi_4.Rdata")
+load("~/Documents/R_directory/Berghia-scRNAseq-v2/rhi_5.Rdata")
+load("~/Documents/R_directory/Berghia-scRNAseq-v2/rhi_6.Rdata")
+load("~/Documents/R_directory/Berghia-scRNAseq-v2/rhi_7.Rdata")
+```
+
+
+
+Merging the different rhinophore_cluster cells data
+
+
+```{r, echo=FALSE}
+rhi <- merge(rhi_0, y= c(rhi_1, rhi_2, rhi_3, rhi_4, rhi_5, rhi_6, rhi_7), add.cell.ids = c("c0", "c1", "c2", "c3", "c4", "c5", "c6","c7"), project = "rhi")
+rhi
+
+#Remove orig.ident because it is meaningless
+rhi$orig.ident <- NULL
+rhi$sub_cluster <- NULL
+
+#Create new orig.ident with the cluster id from the original Seurat analysis with the brain sample
+cluster_id = rhi@active.ident
+
+orig.ident = rep("c0",length(cluster_id))
+orig.ident[str_which(colnames(rhi), "c1_*")] = "c1"
+orig.ident[str_which(colnames(rhi), "c2_*")] = "c2"
+orig.ident[str_which(colnames(rhi), "c3_*")] = "c3"
+orig.ident[str_which(colnames(rhi), "c4_*")] = "c4"
+orig.ident[str_which(colnames(rhi), "c5_*")] = "c5"
+orig.ident[str_which(colnames(rhi), "c6_*")] = "c6"
+orig.ident[str_which(colnames(rhi), "c7_*")] = "c7"
+names(orig.ident) = colnames(rhi) #fill the name of each element of the orig.ident vector with the name of the cells
+
+#Add a new metadata column to Seurat object
+rhi <- AddMetaData(
+  object = rhi,
+  metadata = orig.ident,
+  col.name = "orig.ident")
+
+
+table(rhi$orig.ident)
+# rhi_0
+# rhi_1
+# rhi_2
+# rhi_3
+# rhi_4
+# rhi_5
+# rhi_6
+# rhi_7
+```
+
+
+```{r}
+#This code does the same thing as the Ridge Plot command
+# pp <- berghia_hts@meta.data %>% 
+#   	ggplot(aes(color=berghia_hts@meta.data[["orig.ident"]], x=berghia_hts@meta.data[["nCount_RNA"]], fill= berghia_hts@meta.data[["orig.ident"]])) + 
+#   	geom_density(alpha = 0.2) + 
+#   	scale_x_log10() + 
+#   	theme_classic() +
+#   	ylab("Cell density") +
+#   	geom_vline(xintercept = c(500,1000))
+```
+
+### Preliminary look of metadata
+
+Add number of genes per UMI for each cell to metadata
+
+
+```{r, echo = TRUE}
+head(rhi[[c("orig.ident", "nFeature_RNA", "nCount_RNA")]])
+FeatureScatter(rhi, "nCount_RNA","nFeature_RNA", pt.size = 1.5, group.by = "orig.ident") + labs(title = NULL) + theme(legend.position = c(0.75,0.35))
+vlnplot <- VlnPlot(rhi, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, group.by = "orig.ident", combine = F)
+vlnplot <- lapply(vlnplot, function(x){x + theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) + theme(legend.position = "none")}) #+ scale_x_discrete(labels=c("brain_htstream" = "brain", "rhi_htstream" = "rhinophore\nganglia"), name = NULL)})
+vlnplot[[1]] <- vlnplot[[1]] + labs(title = "Number of genes") + theme(axis.title.x=element_blank()) + labs(tag = "A")
+vlnplot[[2]] <- vlnplot[[2]] + labs(title = "Number of UMIs") + theme(axis.title.x=element_blank()) + labs(tag = "B")
+vlnplot[[1]] + vlnplot[[2]]
+
+median(rhi$nFeature_RNA)
+median(rhi$nCount_RNA)
+
+head(rhi@assays$RNA@counts)
+```
+
+
+UMI counts (transcripts) per cell
+
+The UMI counts per cell should generally be above 500, that is the low end of what we expect. If UMI counts are between 500-1000 counts, it is usable but the cells probably should have been sequenced more deeply
+
+```{r, echo = TRUE}
+RidgePlot(berghia_hts, features="nCount_RNA", group.by = "orig.ident", log = T) + geom_vline(xintercept = c(500,1000))
+```
+
+
+Genes detected per cell
+
+For high quality data, the proportional histogram should contain a single large peak that represents cells that were encapsulated. If we see a small shoulder to the right of the major peak (not present in our data), or a bimodal distribution of the cells, that can indicate a couple of things. It might be that there are a set of cells that failed for some reason. It could also be that there are biologically different types of cells (i.e. quiescent cell populations, less complex cells of interest), and/or one type is much smaller than the other (i.e. cells with high counts may be cells that are larger in size). Therefore, this threshold should be assessed with other metrics that we describe in this lesson.
+
+
+```{r, echo = TRUE}
+RidgePlot(berghia_hts, features="nFeature_RNA", group.by = "orig.ident", log = T) + geom_vline(xintercept = c(300,500))
+#RidgePlot(berghia_hts, features="nFeature_RNA", log = T) + geom_vline(xintercept = c(300,500,1000))
+```
+
+
+Cells with low UMI are likely to be empty GEMs
+
+Show 5% quantiles for number of genes and UMIs per cell
+
+
+```{r, echo = FALSE}
+#as.matrix(quantile(berghia_hts$nFeature_RNA, probs = seq(0,1,0.1)))
+do.call("cbind", tapply(berghia_hts$nFeature_RNA, Idents(berghia_hts),quantile,probs=seq(0,1,0.05)))
+do.call("cbind", tapply(berghia_hts$nCount_RNA, Idents(berghia_hts),quantile,probs=seq(0,1,0.05)))
+```
+
+
+### Processing data
+
+
+Normalize the gene expression for each cell by the total expression
+
+Scale data:
+  shift the expression of each gene, so that the mean expression across cells is 0
+  Scales the expression of each gene, so that the variance across cells is 1. This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate
+  
+Run PCA on the data
+I chose not to select out highly-variable genes is because we don't have a lot of genes and this allows us to keep all the variations when choosing PCs for downstream analysis. The PCs will already captures the most representative variations of the dataset
+    
+
+```{r, include=FALSE}
+rhi <- NormalizeData(rhi, normalization.method = "LogNormalize", scale.factor = 10000)
+all.genes <- rownames(rhi)
+rhi <- ScaleData(rhi, features = all.genes)
+rhi <- RunPCA(rhi, features = all.genes, npcs = 100)
+```
+
+
+```{r, echo=FALSE}
+DimHeatmap(rhi, dims = 1:15, cells = 500, balanced = T)
+ElbowPlot(rhi, ndims = 70, reduction = "pca")
+```
+
+
+###Cell clustering and tSNE/UMAP
+
+
+Choose PCs that carry the most variations of our data. Including too many PCs will include too much noise. There are as many PCs as the number of genes in the dataset
+
+
+```{r, echo=F}
+rhi <- FindNeighbors(rhi, dims = 1:50)
+rhi <- FindClusters(rhi, resolution = 1)
+rhi <- RunTSNE(rhi, dims = 1:50, check_duplicates =F)
+rhi <- RunUMAP(rhi, reduction = "pca", dims = 1:50)
+#rhi <- WhichCells(berghia_hts, cells = colnames(berghia_hts)[str_which(colnames(berghia_hts), "rhi_*")])
+#this command to subset out a set of cells
+```
+
+
+```{r, echo = F}
+tsne <- DimPlot(rhi, reduction = "tsne", shape.by = "orig.ident", group.by = "ident", pt.size = 1.5, label = TRUE, label.size = 6, repel = TRUE)
+tsne
+#umap 1 and 2 were exported to the thesis
+umap1 <- DimPlot(rhi, reduction = "umap", cols = c("#009E73", "#CC79A7", "#F0E442", "#D55E00"), group.by = "ident", pt.size = 1.5, label = TRUE, label.size = 6, repel = TRUE)
+umap2 <- DimPlot(rhi, reduction = "umap", group.by = "orig.ident", pt.size = 1.5, label = TRUE, label.size = 6, repel = TRUE)
+# umap1_30 <- DimPlot(berghia_hts, reduction = "umap", shape.by = "orig.ident", group.by = "ident", pt.size = 1.5, label = TRUE, label.size = 6, repel = TRUE)
+# umap2_30 <- DimPlot(berghia_hts, reduction = "umap", group.by = "orig.ident", pt.size = 1.5, label = TRUE, label.size = 6, repel = TRUE)
+#umap1 <- DimPlot(berghia_hts, reduction = "umap", shape.by = "orig.ident", group.by = "ident", pt.size = 1.5, label=F)
+#umap1<- umap1+ theme(legend.position = "none")
+#umap2 <- DimPlot(berghia_hts, reduction = "umap", group.by = "orig.ident",label=T, repel = T, pt.size = 1.5)
+#umap2<- umap2+ theme(legend.position = "none")
+umap2 <- umap2 + theme(legend.position = "none")
+umap1 <- umap1 + theme(legend.position = "none")
+umap <- umap2+umap1
+umap
+umap + umap_30 + plot_layout(nrow = 2, ncol=2 , byrow = F)
+umap <- umap2 + umap1 + plot_layout(nrow = 1, ncol=2 , byrow = F)
+umap1_30 <- umap1_30 + theme(legend.position = "none")
+umap3
+umap3 <- DimPlot(rhi, reduction = "umap", group.by = "orig.ident", pt.size = 1.5, label = TRUE, label.size = 6, repel = TRUE) + scale_x_continuous(breaks=c(-6,-3,0,3,6)) + scale_y_continuous(breaks=c(-2.5,0,2.5,5)) + theme(legend.position = "none")
+umap4 <- DimPlot(rhi, reduction = "umap", cols = c("#FC4E07","#CC79A7", "#D16103", "#52854C", "#4E84C4","purple") , group.by = "ident", pt.size = 1.5, label = TRUE, label.size = 6, repel = TRUE)
+#umap3 and 4 were w res 1, 70PCs
+#umap5 and 6 were w res 1, 50PCs
+#umap9 and 10 were w res 1.5, 50PCs
+```
+
+UMAP gives a better visualization
+
+
+```{r}
+FeaturePlot(rhi, features = c('nFeature_RNA'), pt.size=0.5)
+FeaturePlot(rhi, features = c('nCount_RNA'), pt.size=0.5)
+```
+
+###Examine each cluster
+
+
+```{r, echo=FALSE}
+FeatureScatter(rhi, "nCount_RNA","nFeature_RNA", pt.size = 0.5)
+RidgePlot(rhi, features = c("nCount_RNA", "nFeature_RNA"), combine = T, ncol =2)
+vlnplot2 <- VlnPlot(rhi, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, combine = F, cols = c("#FC4E07","#CC79A7", "#D16103", "#52854C", "#4E84C4","purple"))
+vlnplot2 <- lapply(vlnplot2, function(x){x + theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) + theme(legend.position = "none")}) #+ scale_x_discrete(labels=c("brain_htstream" = "brain", "rhi_htstream" = "rhinophore\nganglia"), name = NULL)})
+vlnplot2[[1]] <- vlnplot2[[1]] + labs(title = "whatever") + theme(plot.title = element_text(color = "white")) + labs(tag = "C")
+vlnplot2[[2]] <- vlnplot2[[2]] + labs(title = NULL) + labs(tag = "D") + theme(plot.title = element_text(color = "white"))
+vlnplot[[1]] + vlnplot[[2]] + vlnplot2[[1]] + vlnplot2[[2]] + plot_layout(nrow = 2, ncol = 2, byrow = T)
+```
+
+Examine cluster 5 (rhinophore cluster) closely
+
+
+```{r}
+cluster_5 <- subset(berghia_hts, idents = "5")
+cluster_5
+median(cluster_5$nFeature_RNA)
+median(cluster_5$nCount_RNA)
+```
+
+```{r}
+ElbowPlot(cluster_5, ndims = 50)
+cluster_5 <- FindNeighbors(cluster_5, dims = 10)
+cluster_5 <- FindClusters(cluster_5, resolution = 0.1)
+berghia_hts$sub_cluster <- as.character(Idents(berghia_hts))
+berghia_hts$sub_cluster[Cells(cluster_5)] <- paste("c5",Idents(cluster_5))
+#DimPlot(berghia_hts, group.by = "sub_cluster")
+Idents(berghia_hts) <- 'sub_cluster'
+levels(berghia_hts) <- c("0","1","2", "3", "4", "c5 0", "c5 1", "6", "7")
+levels(berghia_hts)
+length(which(cluster_5$orig.ident == "rhi_htstream"))/ncol(cluster_5) #92.23%
+length(which(cluster_5$orig.ident == "brain_htstream"))/ncol(cluster_5) #7.77%
+
+```
+
+```{r}
+umap_c5 <- DimPlot(berghia_hts, reduction = "umap", group.by = "ident", shape.by = "orig.ident", pt.size = 1.5, label = TRUE, label.size = 6, repel = TRUE)
+umap_c5
+
+a <- DimPlot(berghia_hts, cells.highlight = list(c5_0 = WhichCells(cluster_5, idents = 0)), cols.highlight = "red")
+a <- a + theme(legend.position = "none")
+
+b <- DimPlot(berghia_hts, cells.highlight = list(c5_1 = WhichCells(cluster_5, idents = 1)), cols.highlight = "green")
+b <- b + theme(legend.position = "none")
+
+c <- DimPlot(berghia_hts, cells.highlight = list(c5_0 = WhichCells(cluster_5, idents = 0), c5_1 = WhichCells(cluster_5, idents = 1)), cols.highlight = c("green", "red"), combine = T)
+c <- c + theme(legend.position = "none")
+
+a+b+c + plot_layout(nrow = 1, ncol=3 , byrow = T)
+
+
+#grid.arrange(arrangeGrob(a, b, ncol = 2),
+             #c,
+             #nrow = 2)
+#DimPlot(berghia_hts, cells.highlight = list(c5_0 = WhichCells(cluster_5, idents = 0), c5_1 = WhichCells(cluster_5, idents = 1), c5_2 = WhichCells(cluster_5, idents = 2), c5_3 = WhichCells(cluster_5, idents = 3), c5_4 = WhichCells(cluster_5, idents = 4), c5_5 = WhichCells(cluster_5, idents = 5)), cols.highlight = c("red","green","blue","orange"))
+```
+
+
+Examine cluster 3 closely
+
+
+```{r}
+cluster_3 <- subset(berghia_hts, idents = "3")
+cluster_3
+ElbowPlot(cluster_3, ndims = 50)
+cluster_3 <- FindNeighbors(cluster_3, dims = 1:10)
+cluster_3 <- FindClusters(cluster_3, resolution = 0.35) # 0.25, 0.75, 0.85, 1))
+berghia_hts$sub_cluster <- as.character(Idents(berghia_hts))
+berghia_hts$sub_cluster[Cells(cluster_3)] <- paste("c3",Idents(cluster_3))
+Idents(berghia_hts) <- 'sub_cluster'
+levels(berghia_hts) <- c("0","1","2","c3 0", "c3 1", "c3 2", "4", "c5 0", "c5 1", "6", "7")
+
+umap_c3 <- DimPlot(berghia_hts, reduction = "umap", group.by = "ident", shape.by = "orig.ident", pt.size = 1.5, label = TRUE, label.size = 6, repel = TRUE)
+umap_c3 <- umap_c3 + theme(legend.position = "none") 
+umap_c3 + umap1
+
+DimPlot(berghia_hts, reduction = "umap", group.by = "ident", shape.by = "orig.ident", pt.size = 1.5, label = TRUE, label.size = 6, repel = TRUE) + umap1
+```
+
+```{r}
+d<- DimPlot(berghia_hts, cells.highlight = list(c3_0 = WhichCells(cluster_3, idents = 0)), cols.highlight = c("red"))
+e <- DimPlot(berghia_hts, cells.highlight = list(c3_1 = WhichCells(cluster_3, idents = 1)), cols.highlight = c("green"))
+f <- DimPlot(berghia_hts, cells.highlight = list(c3_2 = WhichCells(cluster_3, idents = 2)), cols.highlight = c("blue"))
+g <- DimPlot(berghia_hts, cells.highlight = list(c3_0 = WhichCells(cluster_3, idents = 0), c3_1 = WhichCells(cluster_3, idents = 1), c3_2 = WhichCells(cluster_3, idents = 2)), cols.highlight = c("blue","green","red"), order = c("c3_0", "c3_1", "c3_2"))
+
+d + e + f + g + plot_layout(ncol = 2, nrow = 2, byrow = T)
+
+DimPlot(berghia_hts, cells.highlight = list(c3_0 = WhichCells(cluster_3, idents = 0), c3_1 = WhichCells(cluster_3, idents = 1), c3_2 = WhichCells(cluster_3, idents = 2)), cols.highlight = c("red","green","blue"))
+```
+
+
+### Identify markers for all clusters
+
+pct.1 is the percentage of cells where the gene is detected in the cluster
+pct.2 is the percentage of cells where the gene is detected on average in other clusters
+
+
+```{r, include = FALSE}
+all.markers <- FindAllMarkers(rhi, min.pct = 0.25, test.use = "bimod", only.pos = TRUE, logfc.threshold = 0.25)
+all.markers <- all.markers %>%
+  group_by(gene) %>%
+  slice(which.max(p_val_adj)) %>%
+  filter(p_val_adj != 1e+00)
+all.markers <- all.markers %>% group_by(cluster, p_val_adj)
+```
+
+
+```{r, include=FALSE}
+#Import annotations from Trinotate
+trinotate <- read_tsv("/Users/thibui/Documents/R_directory/Berghia-single-neuron-RNAseq/Berghia_reference_transcriptome_and_annotation/Berghia_alltisses_onerep_trinity291.fasta.transdecoder_cdhit95_noaliens.fasta_trinotate_annotation_report.xls", col_names = TRUE) %>%
+  rename(gene = "#gene_id")
+trinotate <- trinotate %>%
+  select(transcript_id, sprot_Top_BLASTP_hit) %>%
+  separate(sprot_Top_BLASTP_hit, into = c("short1","short2","q","%ID","E","RecName","rest"), sep = "\\^") %>%
+  separate(RecName, into = c("1", "name"), sep = "=") %>%
+  separate(name, into = c("name", "rest"), sep = "\\{") %>%
+  separate(transcript_id, into = c("gene","p"), sep = "\\.") %>%
+  select(gene,short1, name) %>%
+  mutate_if(is.character, str_replace_all, pattern = '_', replacement = '-') %>%
+  unite(annotation,short1,name, sep = "_") %>%
+  add_column(z = rep("g", times = length(trinotate$gene)), .before = "gene") %>%
+  unite(gene, z, gene, sep = "-") #%>%
+  #write_csv("trinotate_annotations_short_thi.csv")
+head(trinotate)
+```
+
+
+
+##Explore top markers of each cluster
+
+
+```{r}
+#Top 5 markers from all clusters
+top5.markers <- all.markers %>% 
+  group_by(cluster) %>% 
+  top_n(n = 5, wt = avg_logFC) %>% arrange(cluster,p_val_adj,desc(pct.1))
+top10.markers <- all.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC) %>% arrange(cluster,p_val_adj,desc(pct.1))
+
+#Make annotation for the top 5 markers list
+top5.markers <- top5.markers %>%
+  left_join(.,trinotate, by = "gene") %>% #join top5.markers on the left of an matched by the gene column
+  arrange(cluster) %>% #arrange by cluster
+  write_csv("top5_markers.csv")
+top5.markers
+```
+
+
+### Highlight some interest marker genes from each cluster
+
+Cluster 0:
+Red = NEC2_PONAB_Neuroendocrine convertase 2 = g-TRINITY-DN15452-c1-g1-i13
+Green = TSN5-BOVIN_Tetraspanin-5 = g-TRINITY-DN6609-c1-g1-i11
+Yellow = Both
+
+```{r, echo = FALSE}
+top5.markers[head(which(top5.markers$cluster == 0),2L),c("gene", "annotation", "p_val_adj", "pct.1", "pct.2")]
+
+p0 <- FeaturePlot(rhi, features = top5.markers$gene[head(which(top5.markers$cluster == 0),2L)] , blend = TRUE, reduction = "umap", combine = FALSE, pt.size = 1.5, label = T, label.size = 6, repel = T)
+p0 <- p0[[3]]
+p0 <- p0 + theme(legend.position = "none") + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6)) + labs(title = NULL) + labs(tag = "A") #+ theme(plot.title = element_text(color = "white"))
+p0
+
+p0_1 <- FeaturePlot(rhi, features = top5.markers$gene[3:4], blend = TRUE, reduction = "umap", combine = FALSE, pt.size = 1.5, label = T, label.size = 6, repel = T)
+p0_1 <- p0_1[[3]]
+p0_1 <- p0_1 + theme(legend.position = "none") + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p0_1
+
+p0_2 <- FeaturePlot(rhi, features = top5.markers$gene[4], reduction = "umap", pt.size = 1.5, label = T, label.size = 6, repel = T)
+p0_2 <- p0_2 + theme(legend.position = "none") + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p0_2
+
+p0_3 <- FeaturePlot(rhi, features = top5.markers$gene[5], reduction = "umap", pt.size = 1.5, label = T, label.size = 6, repel = T)
+p0_3 <- p0_3 + theme(legend.position = "none") + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p0_3
+#p0  + theme(plot.title = element_text(hjust = 0.5)) 
+#top5.markers[head(which(top5.markers$cluster == 0),2L),]
+```
+
+
+
+Cluster 1:
+Red = g-TRINITY-DN4193-c0-g1-i14 = CALL3-RAT_Calmodulin-like protein 3
+Green = g-TRINITY-DN28353-c0-g1-i2 = ANPRC-HUMAN_Atrial natriuretic peptide receptor 3
+Yellow = Both
+
+```{r, echo=FALSE}
+#p1 <- FeaturePlot(berghia_hts, features = c("g-TRINITY-DN13441-c0-g1-i8","g-TRINITY-DN25417-c0-g2-i15"), blend = TRUE, reduction = "umap", combine = FALSE, pt.size = 1.5, label = T, label.size = 6, repel = T)
+#This is before I take out duplicated markers
+#p1+ scale_alpha_manual(name = NULL,
+                        # values = c(1, 1),
+                        # breaks = c("Observed", "Fitted"),
+                        # guide = guide_legend(override.aes = list(linetype = c(0, 1),
+                        #                                           shape = c(16, NA),
+                        #                                           color = "black") ) )
+top5.markers[head(which(top5.markers$cluster == 1),2L),c("gene", "annotation", "p_val_adj", "pct.1", "pct.2")]
+#p1 old <- FeaturePlot(rhi, features = c("g-TRINITY-DN4193-c0-g1-i14","g-TRINITY-DN28353-c0-g1-i2"), blend = T, reduction = "umap", combine = T, pt.size = 1.5, label = T, label.size = 6, repel = T) 
+p1 <- FeaturePlot(rhi, features = c("g-TRINITY-DN471-c6-g1-i1","g-TRINITY-DN35-c3-g1-i15"), blend = T, reduction = "umap", combine = T, pt.size = 1.5, label = T, label.size = 6, repel = T) 
+p1 <- p1[[3]]
+p1 <- p1 + theme(legend.position = "none") + labs(title = NULL) + labs(tag = "B")  + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p1
+```
+
+Cluster 2
+Red = g-TRINITY-DN14179-c0-g2-i4 =	._NA
+Green = g-TRINITY-DN4399-c0-g1-i10 = HHAT-HUMAN_Protein-cysteine N-palmitoyltransferase HHAT;
+Yello = Both
+
+```{r, echo =FALSE}
+top5.markers[head(which(top5.markers$cluster == 2),2L),c("gene", "annotation", "p_val_adj", "pct.1", "pct.2")]
+
+#p2 old <- FeaturePlot(rhi, features = c("g-TRINITY-DN14179-c0-g2-i4", "g-TRINITY-DN4399-c0-g1-i10"), reduction = "umap", blend = T, combine = FALSE, pt.size = 1.5, label = T, label.size = 6, repel = T)
+p2 <- FeaturePlot(rhi, features = c("g-TRINITY-DN7760-c1-g1-i2", "g-TRINITY-DN133-c3-g2-i5"), reduction = "umap", blend = T, combine = FALSE, pt.size = 1.5, label = T, label.size = 6, repel = T)
+p2 <- p2[[3]] + theme(legend.position = "none") + labs(title = NULL) + labs(tag = "C")  + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p2
+```
+
+Cluster 3:
+Red = TSN5_BOVIN_Tetraspanin-5
+Green = PREDICTED: carboxypeptidase Y-like [Biomphalaria glabrata] (a type of air-breathing freshwater snail)
+Yellow = Both
+
+```{r, echo = FALSE}
+#rbind(top5.markers[head(which(top5.markers$cluster == "c3 0"),2L),c("gene", "annotation","pct.1","pct.2","p_val_adj", "cluster")], top5.markers[head(which(top5.markers$cluster == "c3 1"),2L),c("gene", "annotation", "pct.1","pct.2","p_val_adj", "cluster")], top5.markers[head(which(top5.markers$cluster == "c3 2"),2L),c("gene", "annotation", "pct.1","pct.2","p_val_adj", "cluster")])
+
+top5.markers[head(which(top5.markers$cluster == 3),2L),c("gene", "annotation", "p_val_adj", "pct.1", "pct.2")]
+
+# p3 old <- FeaturePlot(rhi, features = c("g-TRINITY-DN204895-c7-g1-i1", "g-TRINITY-DN25682-c0-g1-i1"), reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel =T) 
+p3 <- FeaturePlot(rhi, features = c("g-TRINITY-DN4193-c0-g1-i14", "g-TRINITY-DN28353-c0-g1-i2"), reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel =T)
+p3 <- p3[[3]] + theme(legend.position = "none") + labs(title = NULL) + labs(tag = "D")  + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p3
+
+p3_0 <- FeaturePlot(rhi, features = top5.markers$gene[head(which(top5.markers$cluster == "c3 0"),2L)], reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel =T) 
+p3_0 <- p3_0[[3]] + theme(legend.position = "none") + labs(title = "Markers of Cluster 3.0") + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p3_1 <- FeaturePlot(rhi, features = top5.markers$gene[head(which(top5.markers$cluster == "c3 1"),2L)], reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel =T)
+p3_1 <- p3_1[[3]] + theme(legend.position = "none") + labs(title = "Markers of Cluster 3.1") + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p3_2 <- FeaturePlot(rhi, features = top5.markers$gene[head(which(top5.markers$cluster == "c3 2"),2L)], reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel =T)
+p3_2 <- p3_2[[3]] + theme(legend.position = "none") + labs(title = "Markers of Cluster 3.2") + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p3_0 + p3_1 + p3_2 + plot_layout(ncol = 2, nrow = 2, byrow = T)
+```
+
+```{r}
+top5.markers[head(which(top5.markers$cluster == 4),2L),c("gene", "annotation", "p_val_adj", "pct.1", "pct.2")]
+
+p4 <- FeaturePlot(rhi, features = c("g-TRINITY-DN14179-c0-g2-i4", "g-TRINITY-DN4399-c0-g1-i10"), reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel =T)
+p4 <- p4[[3]] + theme(legend.position = "none") + labs(title = NULL) + labs(tag = "D")  + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p4
+```
+
+
+```{r}
+top5.markers[head(which(top5.markers$cluster == 5),2L),c("gene", "annotation", "p_val_adj", "pct.1", "pct.2")]
+
+p5 <- FeaturePlot(rhi, features = c("g-TRINITY-DN204895-c7-g1-i1", "g-TRINITY-DN25682-c0-g1-i1"), reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel =T)
+p5 <- p5[[3]] + theme(legend.position = "none") + labs(title = NULL) + labs(tag = "D")  + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6))
+p5
+```
+
+##Marker genes labeling combined
+
+```{r, echo = T}
+p0 + p1 + p2 + p3 +p4 +p5 + plot_layout(nrow = 2, ncol = 3, byrow = T)
+```
+
+###Explore a specific gene of interest
+
+##Neurotransmitters
+
+##GABAergic cells
+#GABA markers: Glutamate decarboxylase and vesicular GABA transporter (VGAT)
+
+```{r}
+GABA_markers <- bind_rows(trinotate %>% filter(str_detect(annotation, regex("glutamate", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("decarboxylase", ignore_case = TRUE))), trinotate %>% filter(str_detect(annotation, regex("vesicular", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("GABA", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("transporter", ignore_case = TRUE))))
+GABA_markers
+#write.csv(GABA_markers, file = "GABA.csv")
+```
+
+```{r}
+#Grab expression values
+GABA <- rhi@assays[["RNA"]]@scale.data[all.genes %in% GABA_markers$gene,]
+GABA
+```
+
+There are no genes in the dataset
+
+
+
+##Glutamatergic cells
+#Glutamate markers: glutaminase, vesicular glutamate transporter
+
+```{r}
+glutamate_markers <- bind_rows(trinotate %>% filter(str_detect(annotation, regex("vesicular glutamate", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("transporter", ignore_case = TRUE))), trinotate %>% filter(str_detect(annotation, regex("glutaminase", ignore_case = TRUE))))
+glutamate_markers
+#write.csv(glutamate_markers, file = "glutamate.csv")
+```
+
+```{r}
+#Grab expression values
+glutamate <- rhi@assays[["RNA"]]@scale.data[all.genes %in% glutamate_markers$gene,]
+glutamate
+```
+
+There are no glutamatergic cells
+
+
+
+
+```{r}
+#Find all cells that are glutamate marker-positive
+#Grab expression values of glutamate markers in all cells
+#This is a vector with 988 elements
+glutamate <- berghia_hts@assays[["RNA"]]@scale.data[all.genes %in% glutamate_markers$gene,]
+#Filter out only cells that have positive glutamate markers
+#This is a vector with 3 elements
+glutamate <- glutamate[which(glutamate > 0)]
+#Grab expression values of all genes in glutamate-marker-positive cells
+#This is a 13977x3 matrix array
+glutamate.matrix <- berghia_hts@assays[["RNA"]]@scale.data[,names(glutamate)]
+#take out all negatively expressed genes
+#This is a 4656x3 matrix array
+glutamate.matrix <- glutamate.matrix[which(apply(glutamate.matrix,1,function(x) {sum(x>0)}) !=0),]
+
+#grab cluster information. this is a factor, might be useful for later use in heatmap column colors
+cluster_id <- FetchData(berghia_hts, vars = "seurat_clusters", cells = colnames(glutamate.matrix))
+#bind cluster id with the SCP expression matrix. This increases the number of rows to 4657
+glutamate.matrix <- rbind(as.matrix(glutamate.matrix), matrix(as.numeric(cluster_id$seurat_clusters) - 1, nrow = 1, dimnames = list(colnames(cluster_id), rownames(cluster_id))))
+#name the "gene" column. This increases the number of columns to 4
+glutamate.matrix <- rownames_to_column(as.data.frame(glutamate.matrix), var = "gene")
+#add annotation to the GABA expression matrix
+#This is a 4963x5 tibble
+glutamate.matrix <- as_tibble(glutamate.matrix) %>%
+  right_join(trinotate,., by = "gene")
+#change the name of the last row to cluster
+glutamate.matrix[nrow(glutamate.matrix),1] <- c("cluster")
+#remove duplicates of both genes and annotations because there are some genes that have more than one valid annotation
+#This is a 4873x5 tibble
+glutamate.matrix <- glutamate.matrix[!duplicated(glutamate.matrix, by = c("gene","annotation")), ]
+#drop rows that the duplicated annotation is "._NA"
+temp <- logical(nrow(glutamate.matrix))
+for (i in 1:nrow(glutamate.matrix)) {
+  if (!(glutamate.matrix[i,2] == "._NA" && glutamate.matrix[i,1] %in% glutamate.matrix$gene[-i])){
+    temp[i] <- TRUE
+    }
+}
+#This is a 4758x5 tibble
+glutamate.matrix <- glutamate.matrix[temp,]
+#Use which(duplicated(join$gene)) to check that duplicates don't have NA annotation
+```
+
+
+```{r}
+##Heatmap for glutamate
+#Prepare tibble for heatmap
+#Order the tibble by cluster
+glutamate.matrix <- glutamate.matrix[,c(1,2,order(as.character(glutamate.matrix[nrow(glutamate.matrix),3:ncol(glutamate.matrix)])) + 2)]
+#Get the number of occurrence of each cluster 0:7
+temp <- logical(7L)
+for (i in 1:8){
+  temp[i] <- length(which(glutamate.matrix[nrow(glutamate.matrix),] == i-1))
+}
+#drop the cluster_id row after done ordering
+glutamate.matrix <- glutamate.matrix[-nrow(glutamate.matrix),]
+row_names <- as.matrix(glutamate.matrix[,2])
+glutamate.matrix <- glutamate.matrix[,-(1:2)]
+glutamate.matrix <- as.matrix(glutamate.matrix)
+rownames(glutamate.matrix) <- row_names
+
+#Draw heatmap
+temp
+#look to temp and take out indices that is not 0 to use for heatmap
+#the Seurat cluster color is saved in cc aka column color
+cc <- c(rep(ucols[2],temp[2]), rep(ucols[6],temp[6]), rep(ucols[7],temp[7]))
+heatmap(glutamate.matrix, Colv = NA, ColSideColors = cc, scale = "row")
+#length(which(t$seurat_clusters[order(t$seurat_clusters)] == 0)) use this to find out the number of each cluster
+```
+
+
+##Cholinergic cells
+#Acetylecholine markers: Choline acetyletransferase, vesicular acetylcholine transporter
+
+```{r}
+ACh_markers <- bind_rows(trinotate %>% filter(str_detect(annotation, regex("choline", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("acetyltransferase", ignore_case = TRUE))), trinotate %>% filter(str_detect(annotation, regex("acetylcholine", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("transporter", ignore_case = TRUE))))
+ACh_markers
+#There is no ACh cells
+```
+
+```{r, echo =T}
+pp <- FeaturePlot(rhi, features = ACh_markers$gene, blend = T, combine = F, pt.size = 1.5, label = T, repel = T, label.size = 6) 
+pp[[1]] + labs(title = "CLAT-DANRE_Choline O-acetyltransferase")
+pp[[2]] + labs(title = "VACHT-TETCF_Vesicular acetylcholine transporter")
+pp[[3]]
+```
+
+
+```{r}
+#Find all cells that are ACh marker-positive
+#Grab expression values of ACh markers in all cells
+#This is a 2x988 matrix array
+ACh <- berghia_hts@assays[["RNA"]]@scale.data[all.genes %in% ACh_markers$gene,]
+#Filter out only cells that have positive glutamate markers
+#This is a 2x134 matrix array
+ACh <- ACh[,which(apply(ACh,2,function(x) {sum(x>0)}) !=0)]
+#Grab expression values of all genes in ACh-marker-positive cells
+#This is a 13977x134 matrix array
+ACh.matrix <- berghia_hts@assays[["RNA"]]@scale.data[,colnames(ACh)]
+#take out all negatively expressed genes
+#This is a 12513x3 matrix array
+ACh.matrix <- ACh.matrix[which(apply(ACh.matrix,1,function(x) {sum(x>0)}) !=0),]
+
+#grab cluster information. this is a factor, might be useful for later use in heatmap column colors
+cluster_id <- FetchData(berghia_hts, vars = "seurat_clusters", cells = colnames(ACh.matrix))
+#bind cluster id with the cholinergic cells expression matrix. This increases the number of rows to 12514
+ACh.matrix <- rbind(as.matrix(ACh.matrix), matrix(as.numeric(cluster_id$seurat_clusters) - 1, nrow = 1, dimnames = list(colnames(cluster_id), rownames(cluster_id))))
+#name the "gene" column. This increases the number of columns to 135
+ACh.matrix <- rownames_to_column(as.data.frame(ACh.matrix), var = "gene")
+#add annotation to the cholinergic cells  expression matrix
+#This is a 13156x136 tibble
+ACh.matrix <- as_tibble(ACh.matrix) %>%
+  right_join(trinotate,., by = "gene")
+#change the name of the last row to cluster
+ACh.matrix[nrow(ACh.matrix),1] <- c("cluster")
+#remove duplicates of both genes and annotations because there are some genes that have more than one valid annotation
+#This is a 12920x136 tibble
+ACh.matrix <- ACh.matrix[!duplicated(ACh.matrix, by = c("gene","annotation")), ]
+#drop rows that the duplicated annotation is "._NA"
+temp <- logical(nrow(ACh.matrix))
+for (i in 1:nrow(ACh.matrix)) {
+  if (!(ACh.matrix[i,2] == "._NA" && ACh.matrix[i,1] %in% ACh.matrix$gene[-i])){
+    temp[i] <- TRUE
+    }
+}
+#This is a 12696x136 tibble
+ACh.matrix <- ACh.matrix[temp,]
+#Use which(duplicated(join$gene)) to check that duplicates don't have NA annotation
+```
+
+
+```{r}
+##Heatmap for cholinergic cells
+#Prepare tibble for heatmap
+#Order the tibble by cluster
+ACh.matrix <- ACh.matrix[,c(1,2,order(as.character(ACh.matrix[nrow(ACh.matrix),3:ncol(ACh.matrix)])) + 2)]
+#Get the number of occurrence of each cluster 0:7
+temp <- logical(7L)
+for (i in 1:8){
+  temp[i] <- length(which(ACh.matrix[nrow(ACh.matrix),] == i-1))
+}
+#drop the cluster_id row after done ordering
+ACh.matrix <- ACh.matrix[-nrow(ACh.matrix),]
+row_names <- as.matrix(ACh.matrix[,2])
+ACh.matrix <- ACh.matrix[,-(1:2)]
+ACh.matrix <- as.matrix(ACh.matrix)
+rownames(ACh.matrix) <- row_names
+
+#Draw heatmap
+temp
+#look to temp and take out indices that is not 0 to use for heatmap
+#the Seurat cluster color is saved in cc aka column color
+cc <- c(rep(ucols[1],temp[1]),rep(ucols[2],temp[2]), rep(ucols[3],temp[3]), rep(ucols[4],temp[4]), rep(ucols[6],temp[6]), rep(ucols[7],temp[7]), rep(ucols[8],temp[8]))
+heatmap(ACh.matrix, Colv = NA, ColSideColors = cc, scale = "row")
+#length(which(t$seurat_clusters[order(t$seurat_clusters)] == 0)) use this to find out the number of each cluster
+```
+
+
+###Monoamine neurotransmitters
+
+##Serotonin
+
+#Serotonin markers: Tryptophan hydroxylase
+
+```{r}
+serotonin_markers <- bind_rows(trinotate %>% filter(str_detect(annotation, regex("tryptophan", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("hydroxylase", ignore_case = TRUE))), trinotate %>% filter(str_detect(annotation, regex("tryptophan", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("monooxygenase", ignore_case = TRUE))))
+serotonin_markers
+```
+
+```{r}
+serotonin <- rhi@assays[["RNA"]]@scale.data[all.genes %in% serotonin_markers$gene,]
+serotonin
+FeaturePlot(rhi, features = "g-TRINITY-DN36980-c0-g1-i2", label = T, label.size = 6, repel = T, pt.size = 1.5)
+```
+
+There are no serotonergic cells in the dataset
+
+
+
+##Octopamine
+#Octopamine markers: dopamine beta-hydroxylase
+
+```{r}
+octopamine_markers <- trinotate %>% filter(str_detect(annotation, regex("dopamine", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("beta-hydroxylase", ignore_case = TRUE)))
+octopamine_markers
+write.csv(octopamine_markers, file = "octopamine.csv")
+```
+
+```{r}
+octopamine <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes == "g-TRINITY-DN1289-c4-g1-i1"),]
+octopamine
+FeaturePlot(rhi, features = "g-TRINITY-DN1289-c4-g1-i1", label = T, label.size = 6, repel = T, pt.size = 1.5)
+```
+
+There are no octopamine cells
+
+
+##Dopamine
+#Dopamine markers: Tyrosine hydroxylase
+
+```{r}
+dopamine_markers <- bind_rows(trinotate %>% filter(str_detect(annotation, regex("tyrosine", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("hydroxylase", ignore_case = TRUE))), trinotate %>% filter(str_detect(annotation, regex("tyrosine", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("monooxygenase", ignore_case = TRUE))))
+dopamine_markers
+```
+
+
+```{r}
+dopamine <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes == "g-TRINITY-DN27267-c0-g1-i8"),]
+dopamine
+
+FeaturePlot(rhi, features = "g-TRINITY-DN27267-c0-g1-i8", label = T, label.size = 6, repel = T, pt.size = 1.5) + labs(title = "Tyrosine hydroxylase")
+
+```
+
+
+###Neuropeptides
+##SCP
+
+```{r}
+SCP_markers <- bind_rows(trinotate %>% filter(str_detect(annotation, regex("small", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("cardioactive", ignore_case = TRUE))), trinotate %>% filter(str_detect(annotation, regex("small", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("cardiac-like", ignore_case = TRUE))))
+SCP_markers
+```
+
+
+```{r, echo =T}
+#p4SCP <- FeaturePlot(berghia_hts, features = "g-TRINITY-DN252-c1-g1-i1", reduction = "umap", label = F, pt.size = 1.5)
+pSCP <- FeaturePlot(rhi, features = "g-TRINITY-DN252-c1-g1-i1", reduction = "umap", pt.size = 1.5)
+pSCP <- pSCP + labs(title = "SCP") + scale_x_continuous(breaks=c(-6,-3,0,3,6)) + scale_y_continuous(breaks=c(-2.5,0,2.5,5)) + theme(legend.position = "none")
+pSCP + umap2 + plot_layout(nrow = 1, ncol = 2)
+#This is graphed on a continuous scale not discrete
+#name : x or y axis labels
+# breaks : control the breaks in the guide (axis ticks, grid lines, …). Among the possible values, there are :
+# NULL : hide all breaks
+# waiver() : the default break computation
+# a character or numeric vector specifying the breaks to display
+# labels : labels of axis tick marks. Allowed values are :
+# NULL for no labels
+# waiver() for the default labels
+# character vector to be used for break labels
+# limits : a numeric vector specifying x or y axis limits (min, max)
+# trans for axis transformations. Possible values are “log2”, “log10”, “sqrt”, etc
+p4SCP
+HoverLocator(plot = p4SCP, information = FetchData(berghia_hts, vars = c("ident", "nFeature_RNA")))
+#p4.ChaT <- FeaturePlot(berghia_hts, features = "g-TRINITY-DN36980-c0-g1-i1", reduction = "tsne", label = T)
+#CombinePlots(plots = list(p4.ChaT , tsne), ncol = 2)
+```
+
+
+```{r, echo = F}
+###Use this code section to grab out gene expression matrix when there is only one gene
+#SCP <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes == "g-TRINITY-DN252-c1-g1-i1"),]
+#SCP <- SCP[which(SCP > 0)]
+#Otherwise, use the code below
+
+#Subset out all SCP cells
+#SCP <- WhichCells(berghia_hts, vars = 'g-TRINITY-DN252-c1-g1-i1')
+#y <- grep("g-TRINITY-DN252-c1-g1-i1", all.genes, value = T)
+
+#Find all cells that are SCP-positive
+#grab expression values of SCP in all cells. this is a vector with 988 elements
+SCP <- berghia_hts@assays[["RNA"]]@scale.data[all.genes %in% SCP_markers$gene,]
+#only take cells that are SCP-positive. this is a vector with 31 elements
+SCP <- SCP[,which(apply(SCP,2,function(x) {sum(x>0)}) !=0)]
+#grab the expression values of SCP-positive cells
+#This is a 13977x31 matrix
+SCP.matrix <- berghia_hts@assays[["RNA"]]@scale.data[,colnames(SCP)]
+#take out all negatively expressed genes
+#This is a 10162x31 matrix
+SCP.matrix <- SCP.matrix[which(apply(SCP.matrix,1,function(x) {sum(x>0)}) !=0),] #take sum across rows, sum on all positive x values. Drop all rows that their sum is 0, i.e. the genes are negatively expressed in all cells
+
+#grab cluster information
+cluster_id <- FetchData(berghia_hts, vars = "seurat_clusters", cells = colnames(SCP.matrix))
+#bind cluster id with the SCP expression matrix. This increases the number of rows to 10163
+SCP.matrix <- rbind(as.matrix(SCP.matrix), matrix(as.numeric(cluster_id$seurat_clusters) - 1, nrow = 1, dimnames = list(colnames(cluster_id), rownames(cluster_id)))) #when a character is converted to numeric, all values are added 1, hence we have to -1.
+
+#name the "gene" column. This increases the number of columns to 32
+SCP.matrix <- rownames_to_column(as.data.frame(SCP.matrix), var = "gene") #for some reason it won't name the column as gene, hence I have to rename later in tibble
+#add annotation to the SCP expression matrix
+#This is a 10725x33 tibble
+SCP.matrix <- as_tibble(SCP.matrix) %>%
+  right_join(trinotate,., by = "gene")
+#change the name of the last row to cluster
+SCP.matrix[nrow(SCP.matrix),1] <- c("cluster")
+
+#remove duplicates of both genes and annotations because there are some genes that have more than one valid annotation
+#This is a 10522x33 tibble
+SCP.matrix <- SCP.matrix[!duplicated(SCP.matrix, by = c("gene","annotation")), ]
+#drop rows that the duplicated annotation is "._NA"
+#This is a 10328x33 tibble
+temp <- logical(nrow(SCP.matrix))
+for (i in 1:nrow(SCP.matrix)) {
+  if (!(SCP.matrix[i,2] == "._NA" && SCP.matrix[i,1] %in% SCP.matrix$gene[-i])){
+    temp[i] <- TRUE
+    }
+}
+SCP.matrix <- SCP.matrix[temp,]
+```
+
+
+```{r, echo =T}
+#Heatmap with Seurat
+#SCP.heatmap <- DoHeatmap(object = berghia_hts, features = rownames(SCP.matrix), cells = colnames(SCP.matrix), group.by = 'ident')
+#SCP.heatmap.column.scale <- heatmap(SCP.matrix.no.negative, scale = "column")
+# Heatmap(SCP.matrix.no.negative)
+# heatmap(SCP.matrix.no.negative, Colv = df$seurat_clusters)
+
+#Heatmap with base R
+#Prepare tibble for heatmap
+#Order the tibble by cluster
+SCP.matrix <- SCP.matrix[,c(1,2,order(as.character(SCP.matrix[nrow(SCP.matrix),3:ncol(SCP.matrix)])) + 2)]
+#Get the number of occurrence of each cluster 0:7
+temp <- logical(7L)
+for (i in 1:8){
+  temp[i] <- length(which(SCP.matrix[nrow(SCP.matrix),] == i-1))
+}
+#drop the cluster_id row after done ordering
+SCP.matrix <- SCP.matrix[-nrow(SCP.matrix),]
+#Get the annotation column as row names for the heat map numeric matrix
+row_names <- as.matrix(SCP.matrix[,2])
+#Drop the gene and annotation columns
+SCP.matrix <- SCP.matrix[,-(1:2)]
+#make the tibble into numeric matrix
+SCP.matrix <- as.matrix(SCP.matrix)
+#put in row names
+rownames(SCP.matrix) <- row_names
+
+#Draw heatmap
+temp
+#look to temp and take out indices that is not 0 to use for heatmap
+#Grab the Seurat color of each cluster
+pbuild <- ggplot2::ggplot_build(umap1) # Use ggplot_build to deconstruct the ggplot object
+pdata <- pbuild$data[[1]] # Pull the data used for the plot
+pdata <-  pdata[order(pdata$group), ] # Order the plot data by group
+ucols <- unique(pdata$colour) # Get a vector of unique colors
+names(ucols) <- as.factor(seq(0,7,1)) # Add the groups to the vector of colors as names
+cc <- c(rep(ucols[1],temp[1]),rep(ucols[2],temp[2]), rep(ucols[3],temp[3]), rep(ucols[4],temp[4]), rep(ucols[6],temp[6]), rep(ucols[7],temp[7]))
+heatmap(SCP.matrix, Colv = NA, ColSideColors = cc, scale = "row")
+#heatmap(t3, ColSideColors = cc, scale = "row")
+#length(which(t$seurat_clusters[order(t$seurat_clusters)] == 0)) use this to find out the number of each cluster
+```
+
+
+##FMRFamide
+
+```{r, echo=T}
+FMRFamide_markers <- trinotate %>% filter(str_detect(annotation, regex("FMRFamide", ignore_case = TRUE))) %>% filter(str_detect(annotation, regex("peptides", ignore_case = TRUE)))
+FMRFamide_markers
+write.csv(FMRFamide_markers, file = "FMRFamide.csv")
+```
+
+```{r, echo=T}
+FeaturePlot(berghia_hts, features = "g-TRINITY-DN1785-c0-g1-i2", blend = F, combine = F, pt.size = 1.5, label = T, label.size = 6)
+
+```
+
+
+```{r, echo=T}
+#Find all cells that are serotonin marker-positive
+#Grab expression values of FMRFamide-markers in all cells
+#This is a 4x988 matrix array
+FMRFamide <- berghia_hts@assays[["RNA"]]@scale.data[all.genes %in% FMRFamide_markers$gene,]
+FMRFamide
+#Filter out only cells that are FMRFamide-positive
+#This is a 4x618 matrix array
+FMRFamide <- FMRFamide[,which(apply(FMRFamide,2,function(x) {sum(x>0)}) !=0)]
+#Grab expression values of all genes in 618 FMRFamide-positive cells
+#This is a 13977x618 matrix array
+FMRFamide.matrix <- berghia_hts@assays[["RNA"]]@scale.data[,colnames(FMRFamide)]
+#take out all negatively expressed genes
+#This is a 13919x618 matrix array
+FMRFamide.matrix <- FMRFamide.matrix[which(apply(FMRFamide.matrix,1,function(x) {sum(x>0)}) !=0),]
+```
+
+Because there are 618 cells from the combination of all the marker genes above, I just took out one gene, which is g-TRINITY-DN1785-c0-g1-i2 = FMRF-LYMST_FMRFamide neuropeptides
+
+```{r, echo=T}
+#Try out with just one gene g-TRINITY-DN1785-c0-g1-i2 = FMRF-LYMST_FMRFamide neuropeptides
+# FMRFamide_1 <- FMRFamide
+# rownames(FMRFamide_1) <- trinotate[which(trinotate$gene %in% rownames(FMRFamide)),]$annotation
+# FMRFamide_1
+FMRFamide_1 <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes == "g-TRINITY-DN1785-c0-g1-i2"),]
+FMRFamide_1 <- FMRFamide_1[which(FMRFamide_1 > 0)]
+#Grab expression values of all genes in 618 FMRFamide-positive cells
+#This is a 13977x12 matrix array
+FMRFamide1.matrix <- berghia_hts@assays[["RNA"]]@scale.data[,names(FMRFamide_1)]
+#take out all negatively expressed genes
+#This is a 8427x12 matrix array
+FMRFamide1.matrix <- FMRFamide1.matrix[which(apply(FMRFamide1.matrix,1,function(x) {sum(x>0)}) !=0),]
+
+#grab cluster information. this is a factor, might be useful for later use in heatmap column colors
+cluster_id <- FetchData(berghia_hts, vars = "seurat_clusters", cells = colnames(FMRFamide1.matrix))
+#bind cluster id with the FMRFamide expression matrix. This increases the number of rows to 8428
+FMRFamide1.matrix <- rbind(as.matrix(FMRFamide1.matrix), matrix(as.numeric(cluster_id$seurat_clusters) - 1, nrow = 1, dimnames = list(colnames(cluster_id), rownames(cluster_id))))
+#name the "gene" column. This increases the number of columns to 13
+FMRFamide1.matrix <- rownames_to_column(as.data.frame(FMRFamide1.matrix), var = "gene")
+#add annotation to the GABA expression matrix
+#This is a 8934x13 tibble
+FMRFamide1.matrix <- as_tibble(FMRFamide1.matrix) %>%
+  right_join(trinotate,., by = "gene")
+#change the name of the last row to cluster
+FMRFamide1.matrix[nrow(FMRFamide1.matrix),1] <- c("cluster")
+#remove duplicates of both genes and annotations because there are some genes that have more than one valid annotation
+#This is a 8749x14 tibble
+FMRFamide1.matrix <- FMRFamide1.matrix[!duplicated(FMRFamide1.matrix, by = c("gene","annotation")), ]
+#drop rows that the duplicated annotation is "._NA"
+temp <- logical(nrow(FMRFamide1.matrix))
+for (i in 1:nrow(FMRFamide1.matrix)) {
+  if (!(FMRFamide1.matrix[i,2] == "._NA" && FMRFamide1.matrix[i,1] %in% FMRFamide1.matrix$gene[-i])){
+    temp[i] <- TRUE
+    }
+}
+#This is a 8575x14 tibble
+FMRFamide1.matrix <- FMRFamide1.matrix[temp,]
+#Use which(duplicated(join$gene)) to check that duplicates don't have NA annotation
+```
+
+
+```{r, echo=T}
+#Heatmap for FMRFamide
+#Prepare tibble for heatmap
+#Order the tibble by cluster
+FMRFamide1.matrix <- FMRFamide1.matrix[,c(1,2,order(as.character(FMRFamide1.matrix[nrow(FMRFamide1.matrix),3:ncol(FMRFamide1.matrix)])) + 2)]
+#Get the number of occurrence of each cluster 0:7
+temp <- logical(7L)
+for (i in 1:8){
+  temp[i] <- length(which(FMRFamide1.matrix[nrow(FMRFamide1.matrix),] == i-1))
+}
+#drop the cluster_id row after done ordering
+FMRFamide1.matrix <- FMRFamide1.matrix[-nrow(FMRFamide1.matrix),]
+#Get the annotation column as row names for the heat map numeric matrix
+row_names <- as.matrix(FMRFamide1.matrix[,2])
+#Drop the gene and annotation columns
+FMRFamide1.matrix <- FMRFamide1.matrix[,-(1:2)]
+#make the tibble into numeric matrix
+FMRFamide1.matrix <- as.matrix(FMRFamide1.matrix)
+#put in row names
+rownames(FMRFamide1.matrix) <- row_names
+#This is a 8574x12 tibble
+
+#Draw heatmap
+temp
+#look to temp and take out indices that is not 0 to use for heatmap
+cc <- c(rep(ucols[1],temp[1]),rep(ucols[2],temp[2]), rep(ucols[6],temp[6]))
+heatmap(FMRFamide1.matrix, Colv = NA, ColSideColors = cc, scale = "row")
+#heatmap(t3, ColSideColors = cc, scale = "row")
+#length(which(t$seurat_clusters[order(t$seurat_clusters)] == 0)) use this to find out the number of each cluster
+```
+
+##APGWamide
+
+```{r, echo=T}
+APGWamide_markers <- trinotate %>% filter(str_detect(annotation, regex("APGWamide", ignore_case = TRUE)))
+APGWamide_markers
+APGWamide_markers_blast <- c("g-TRINITY-DN117340-c0-g1-i1", "g-TRINITY-DN21075-c0-g1-i9")
+#APGWamide_blast <- str_replace_all(APGWamide_markers_blast, "-", "_") %>% str_replace_all(".*TRINITY", "TRINITY")
+APGWamide_markers_blast
+#There were no sequences so I used local BLAST to blast Aplysia's APGWamide sequence against Berghia peptide db and get the following sequences:
+#g-TRINITY-DN117340-c0-g1-i1, g-TRINITY-DN21075-c0-g1-i9
+# TRINITY_DN14316_c0_g1_i10, TRINITY_DN4093_c0_g1_i7, TRINITY_DN4466_c1_g1_i5, TRINITY_DN340847_c0_g1_i1, TRINITY_DN255823_c0_g1_i1, TRINITY_DN205_c1_g1_i17, TRINITY_DN9886_c0_g1_i19, TRINITY_DN24869_c0_g1_i4, TRINITY_DN5711_c0_g1_i7, TRINITY_DN4301_c0_g1_i4
+
+#Find all cells that are APGWamide-positive
+#Grab expression values of APGWamide in all cells
+#This is a 2x988 matrix array
+APGWamide <- berghia_hts@assays[["RNA"]]@scale.data[all.genes %in% APGWamide_markers_blast,]
+APGWamide
+#Filter out cells that are APGWamide-negative
+#This is a 6x163 matrix array
+APGWamide <- APGWamide[,which(apply(APGWamide,2,function(x) {sum(x>0)}) !=0)]
+#Grab expression values of all genes in APGWamide-positive cells
+#This is a 13977x163 matrix array
+APGWamide.matrix <- berghia_hts@assays[["RNA"]]@scale.data[,colnames(APGWamide)]
+#take out all negatively expressed genes
+#This is a 13438x163 matrix array
+APGWamide.matrix <- APGWamide.matrix[which(apply(APGWamide.matrix,1,function(x) {sum(x>0)}) !=0),]
+
+#grab cluster information. this is a factor, might be useful for later use in heatmap column colors
+cluster_id <- FetchData(berghia_hts, vars = "seurat_clusters", cells = colnames(APGWamide.matrix))
+#bind cluster id with the FMRFamide expression matrix. This increases the number of rows to 13439
+APGWamide.matrix <- rbind(as.matrix(APGWamide.matrix), matrix(as.numeric(cluster_id$seurat_clusters) - 1, nrow = 1, dimnames = list(colnames(cluster_id), rownames(cluster_id))))
+#name the "gene" column. This increases the number of columns to 164
+APGWamide.matrix <- rownames_to_column(as.data.frame(APGWamide.matrix), var = "gene")
+#add annotation to the GABA expression matrix
+#This is a 14109x165 tibble
+APGWamide.matrix <- as_tibble(APGWamide.matrix) %>%
+  right_join(trinotate,., by = "gene")
+#change the name of the last row to cluster
+APGWamide.matrix[nrow(APGWamide.matrix),1] <- c("cluster")
+#remove duplicates of both genes and annotations because there are some genes that have more than one valid annotation
+#This is a 13866x165 tibble
+APGWamide.matrix <- APGWamide.matrix[!duplicated(APGWamide.matrix, by = c("gene","annotation")), ]
+#drop rows that the duplicated annotation is "._NA"
+temp <- logical(nrow(APGWamide.matrix))
+for (i in 1:nrow(APGWamide.matrix)) {
+  if (!(APGWamide.matrix[i,2] == "._NA" && APGWamide.matrix[i,1] %in% APGWamide.matrix$gene[-i])){
+    temp[i] <- TRUE
+    }
+}
+#This is a 13632x165 tibble
+APGWamide.matrix <- APGWamide.matrix[temp,]
+#Use which(duplicated(join$gene)) to check that duplicates don't have NA annotation
+```
+
+
+```{r, echo=T}
+#Heatmap for APGWamide
+#Prepare tibble for heatmap
+#Order the tibble by cluster
+APGWamide.matrix <- APGWamide.matrix[,c(1,2,order(as.character(APGWamide.matrix[nrow(APGWamide.matrix),3:ncol(APGWamide.matrix)])) + 2)]
+#Get the number of occurrence of each cluster 0:7
+temp <- logical(7L)
+for (i in 1:8){
+  temp[i] <- length(which(APGWamide.matrix[nrow(APGWamide.matrix),] == i-1))
+}
+#drop the cluster_id row after done ordering
+APGWamide.matrix <- APGWamide.matrix[-nrow(APGWamide.matrix),]
+#Get the annotation column as row names for the heat map numeric matrix
+row_names <- as.matrix(APGWamide.matrix[,2])
+#Drop the gene and annotation columns
+APGWamide.matrix <- APGWamide.matrix[,-(1:2)]
+#make the tibble into numeric matrix
+APGWamide.matrix <- as.matrix(APGWamide.matrix)
+#put in row names
+rownames(APGWamide.matrix) <- row_names
+#This is a 8574x12 tibble
+
+#Draw heatmap
+temp
+#look to temp and take out indices that is not 0 to use for heatmap
+cc <- c(rep(ucols[1],temp[1]),rep(ucols[2],temp[2]), rep(ucols[3],temp[3]), rep(ucols[4],temp[4]), rep(ucols[5],temp[5]), rep(ucols[6],temp[6]))
+heatmap(APGWamide.matrix, Colv = NA, ColSideColors = cc, scale = "row")
+#heatmap(t3, ColSideColors = cc, scale = "row")
+#length(which(t$seurat_clusters[order(t$seurat_clusters)] == 0)) use this to find out the number of each cluster
+
+```
+
+
+
+```{r, echo=T}
+pAPGWamide <- FeaturePlot(rhi, features = c("g-TRINITY-DN117340-c0-g1-i1","g-TRINITY-DN21075-c0-g1-i9"), blend = T, combine = F, reduction = "umap", pt.size = 1.5)
+pAPGWamide <- pAPGWamide[[3]] + theme(legend.position = "none") + labs(title = "APGWamide") + scale_x_continuous(breaks=c(-6,-3,0,3,6)) + scale_y_continuous(breaks=c(-2.5,0,2.5,5))
+umap3 + pAPGWamide
+#HoverLocator(plot = p4SCP, information = FetchData(berghia_hts, vars = c("ident", "nFeature_RNA")))
+#p4.ChaT <- FeaturePlot(berghia_hts, features = "g-TRINITY-DN36980-c0-g1-i1", reduction = "tsne", label = T)
+#CombinePlots(plots = list(p4.ChaT , tsne), ncol = 2)
+```
+
+
+##Conopressin
+#Conopressin markers: Conopressin, Neurophysin, conophysin
+
+```{r, echo=T}
+conopressin_markers <- bind_rows(trinotate %>% filter(str_detect(annotation, regex("conopressin", ignore_case = TRUE))), trinotate %>% filter(str_detect(annotation, regex("neurophysin", ignore_case = TRUE))), trinotate %>% filter(str_detect(annotation, regex("conophysin", ignore_case = TRUE))))
+conopressin_markers
+write.csv(conopressin_markers, file = "conopressin.csv")
+```
+
+
+```{r, echo=T}
+conopressin <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes == "g-TRINITY-DN957-c0-g2-i8"),]
+conopressin <-conopressin[which(conopressin > 0)]
+#Grab expression values of all genes in 618 FMRFamide-positive cells
+#This is a 13977x12 matrix array
+conopressin.matrix <- berghia_hts@assays[["RNA"]]@scale.data[,names(conopressin)]
+#take out all negatively expressed genes
+#This is a 8427x12 matrix array
+conopressin.matrix <- conopressin.matrix[which(apply(conopressin.matrix,1,function(x) {sum(x>0)}) !=0),]
+
+#grab cluster information. this is a factor, might be useful for later use in heatmap column colors
+cluster_id <- FetchData(berghia_hts, vars = "seurat_clusters", cells = colnames(conopressin.matrix))
+#bind cluster id with the FMRFamide expression matrix. This increases the number of rows to 13439
+conopressin.matrix <- rbind(as.matrix(conopressin.matrix), matrix(as.numeric(cluster_id$seurat_clusters) - 1, nrow = 1, dimnames = list(colnames(cluster_id), rownames(cluster_id))))
+#name the "gene" column. This increases the number of columns to 164
+conopressin.matrix <- rownames_to_column(as.data.frame(conopressin.matrix), var = "gene")
+#add annotation to the GABA expression matrix
+#This is a 14109x165 tibble
+conopressin.matrix <- as_tibble(conopressin.matrix) %>%
+  right_join(trinotate,., by = "gene")
+#change the name of the last row to cluster
+conopressin.matrix[nrow(conopressin.matrix),1] <- c("cluster")
+#remove duplicates of both genes and annotations because there are some genes that have more than one valid annotation
+#This is a 13866x165 tibble
+conopressin.matrix <- conopressin.matrix[!duplicated(conopressin.matrix, by = c("gene","annotation")), ]
+#drop rows that the duplicated annotation is "._NA"
+temp <- logical(nrow(conopressin.matrix))
+for (i in 1:nrow(conopressin.matrix)) {
+  if (!(conopressin.matrix[i,2] == "._NA" && conopressin.matrix[i,1] %in% conopressin.matrix$gene[-i])){
+    temp[i] <- TRUE
+    }
+}
+#This is a 2875x9 tibble
+conopressin.matrix <- conopressin.matrix[temp,]
+#Use which(duplicated(join$gene)) to check that duplicates don't have NA annotation
+```
+
+
+```{r, echo=T}
+#Heatmap for APGWamide
+#Prepare tibble for heatmap
+#Order the tibble by cluster
+conopressin.matrix <- conopressin.matrix[,c(1,2,order(as.character(conopressin.matrix[nrow(conopressin.matrix),3:ncol(conopressin.matrix)])) + 2)]
+#Get the number of occurrence of each cluster 0:7
+temp <- logical(7L)
+for (i in 1:8){
+  temp[i] <- length(which(conopressin.matrix[nrow(conopressin.matrix),] == i-1))
+}
+#drop the cluster_id row after done ordering
+conopressin.matrix <- conopressin.matrix[-nrow(conopressin.matrix),]
+#Get the annotation column as row names for the heat map numeric matrix
+row_names <- as.matrix(conopressin.matrix[,2])
+#Drop the gene and annotation columns
+conopressin.matrix <- conopressin.matrix[,-(1:2)]
+#make the tibble into numeric matrix
+conopressin.matrix <- as.matrix(conopressin.matrix)
+#put in row names
+rownames(conopressin.matrix) <- row_names
+#This is a 8574x12 tibble
+
+#Draw heatmap
+temp
+#look to temp and take out indices that is not 0 to use for heatmap
+cc <- c(rep(ucols[4],temp[4]), rep(ucols[6],temp[6]))
+heatmap(conopressin.matrix, Colv = NA, ColSideColors = cc, scale = "row")
+#heatmap(t3, ColSideColors = cc, scale = "row")
+#length(which(t$seurat_clusters[order(t$seurat_clusters)] == 0)) use this to find out the number of each cluster
+
+```
+
+
+```{r, echo=T}
+pConopressin <- FeaturePlot(berghia_hts, features = "g-TRINITY-DN957-c0-g2-i8", reduction = "umap", label = F, pt.size = 1.5) + theme(legend.position = "none") + labs(title = NULL) + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6)) + umap.blend + plot_layout(nrow = 1, ncol=3 , byrow = F)
+pConopressin
+```
+
+
+##Egg-laying hormone
+#Egg-laying hormone marker: ELH neuropeptide
+
+```{r, echo=T}
+ELH_markers <- c("g-TRINITY-DN1867-c0-g1-i1")
+#There were no sequences so I used local BLAST to blast the ELH sequence that Cheyenne used to make HCR probe against the Berghia peptide db. Aplysia's ELH sequence against Berghia peptide db and get the following sequences:
+pELH <- FeaturePlot(berghia_hts, features = "g-TRINITY-DN1867-c0-g1-i1", reduction = "umap", label = T, label.size = 6, repel = T,  pt.size = 1.5) 
+#+ theme(legend.position = "none") + labs(title = NULL) + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6)) + umap.blend + plot_layout(nrow = 1, ncol=3 , byrow = F)
+pELH
+```
+
+
+```{r, echo=T}
+# overlaying_cells <- DimPlot(berghia_hts, reduction = "umap", cells.highlight = list(ACh = colnames(ACh.matrix), glutamate = colnames(glutamate.matrix), SCP_pep = colnames(SCP.matrix), APGWamide_pep = colnames(APGWamide.matrix), conopressin_pep = colnames(conopressin.matrix), FMRFamide_pep = colnames(FMRFamide1.matrix)), cols.highlight = c("red","green","blue","orange","pink","purple"), sizes.highlight = 2,  shape.by = "orig.ident", group.by = "ident", pt.size = 1.5, label = T, label.size = 6, repel = T)
+
+ChAT <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes =="g-TRINITY-DN14660-c0-g1-i2"),]
+ChAT <- ChAT[which(ChAT>0)]
+
+VACHT <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes =="g-TRINITY-DN14660-c0-g2-i2"),]
+VACHT <- VACHT[which(VACHT>0)]
+
+SCP <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes =="g-TRINITY-DN252-c1-g1-i1"),]
+SCP <- SCP[which(SCP>0)]
+
+FMRFamide <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes =="g-TRINITY-DN1785-c0-g1-i2"),]
+FMRFamide <- FMRFamide[which(FMRFamide>0)]
+
+conopressin <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes == "g-TRINITY-DN957-c0-g2-i8"),]
+conopressin <- conopressin[which(conopressin>0)]
+
+APGWamide <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes == "g-TRINITY-DN117340-c0-g1-i1"),]
+APGWamide <- APGWamide[which(APGWamide>0)]
+
+glutamate <- berghia_hts@assays[["RNA"]]@scale.data[which(all.genes == "g-TRINITY-DN324196-c0-g1-i1 "),]
+glutamate <- glutamate[which(glutamate>0)]
+
+overlaying_cells <- DimPlot(berghia_hts, reduction = "umap", cells.highlight = list(ChAT = names(ChAT), VACHT = names(VACHT), VGLU3 = names(glutamate), SCP_pep = names(SCP), APGWamide_pep = names(APGWamide), conopressin_pep = names(conopressin), FMRFamide_pep = names(FMRFamide)), cols.highlight = c("red","green","blue","orange","pink","purple", "cyan"), sizes.highlight = 2,  shape.by = "orig.ident", group.by = "ident", pt.size = 1.5, label = T, label.size = 6, repel = T)
+
+
+overlaying_cells
+```
+
+```{r, echo=T}
+#First gene is APGWamide (g-TRINITY-DN117340-c0-g1-i1), second gene is SCP (g-TRINITY-DN252-c1-g1-i1)
+pAPGWamide_SCP <- FeaturePlot(berghia_hts, features = c("g-TRINITY-DN117340-c0-g1-i1","g-TRINITY-DN252-c1-g1-i1"), reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel = T)
+pAPGWamide_SCP <- pAPGWamide_SCP[[3]] + labs(title = "APGWamide vs SCP") + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6)) + theme(legend.position = 'none')
+pAPGWamide_SCP
+```
+
+
+```{r, echo=T}
+#First gene is APGWamide, second gene is ChAT
+pAPGWamide_ChAT <- FeaturePlot(berghia_hts, features = c("g-TRINITY-DN117340-c0-g1-i1", "g-TRINITY-DN14660-c0-g1-i2"), reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel = T)
+pAPGWamide_ChAT <- pAPGWamide_ChAT[[3]]  + labs(title = "APGWamide vs ChAT") + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6)) + theme(legend.position = "none")
+pAPGWamide_ChAT
+```
+
+
+```{r, echo=T}
+#First gene is SCP, second gene is ChAT
+pSCP_ChAT <- FeaturePlot(rhi, features = c("g-TRINITY-DN252-c1-g1-i1", "g-TRINITY-DN14660-c0-g1-i2"), reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel = T)
+pSCP_ChAT <- pSCP_ChAT[[3]]  + labs(title = "SCP vs ChAT")+ scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6)) + theme(legend.position = "none")
+pSCP_ChAT
+```
+
+
+```{r, echo=T}
+#First gene is APGWamide, second gene is FMRFamide
+pAPGWamide_FMRFamide <- FeaturePlot(rhi, features = c("g-TRINITY-DN117340-c0-g1-i1", "g-TRINITY-DN1785-c0-g1-i2"), reduction = "umap", blend = T, combine = F, label = T, label.size = 6, repel = T)
+pAPGWamide_FMRFamide <- pAPGWamide_FMRFamide[[3]]  + labs(title = "APGWamide vs FMRFamide") + scale_x_continuous(breaks=c(-3,0,3)) + scale_y_continuous(breaks=c(-3,0,3,6)) + theme(legend.position = "none")
+pAPGWamide_FMRFamide
+```
+
+##Save object, write out a tab-delimited table
+```{r, include = F}
+save(rhi, file="berghia_rhinophore.RData")
+saveRDS(rhi, file="berghia_rhinophore.rds")
+sessionInfo()
+```
+
